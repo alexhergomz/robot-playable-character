@@ -1,0 +1,13 @@
+# core
+mujoco>=3.2
+torch>=2.4
+numpy>=2.0
+scipy>=1.11
+# operator input
+pygame>=2.6
+# language channel (optional: falls back to a hash encoder if absent)
+open_clip_torch>=2.24
+# tracker training
+gymnasium>=1.0
+# tests
+pytest>=8.0

@@ -1,0 +1,41 @@
+{
+ "note": "Measured ceiling of the full loop, not a design choice. The generator reaches the commanded speed (reference 2.26 m/s at command 2.5) but the robot does not: achieved saturates near 1.0 m/s and the surplus appears as stance foot slip, which leaves the training corpus's band (1.4-3.9 cm/s) above command 1.6. Commanding past that asks the robot to slide.",
+ "command": [
+  0.4,
+  0.7,
+  1.0,
+  1.3,
+  1.6,
+  2.0,
+  2.5
+ ],
+ "reference": [
+  0.32,
+  0.56,
+  0.85,
+  1.19,
+  1.47,
+  1.84,
+  2.26
+ ],
+ "achieved": [
+  0.42,
+  0.41,
+  0.58,
+  0.93,
+  0.99,
+  0.97,
+  0.93
+ ],
+ "slip_cm_s": [
+  0.8,
+  1.2,
+  1.8,
+  3.7,
+  3.2,
+  5.3,
+  9.2
+ ],
+ "feasible_command_max": 1.6,
+ "feasible_speed_max": 1.0
+}

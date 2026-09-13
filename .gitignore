@@ -1,0 +1,24 @@
+# Data, model weights and vendored third-party code are not tracked.
+# Everything under these is reproducible from the scripts in scripts/.
+data/
+runs/
+assets/
+external/
+out/
+
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+*.mp4
+*.png
+*.pdf
+*.npz
+*.npy
+*.pt
+*.onnx
+
+.DS_Store
+.ipynb_checkpoints/
