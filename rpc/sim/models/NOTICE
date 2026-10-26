@@ -1,0 +1,7 @@
+g1_29dof_rev_1_0.xml is from NVlabs/GR00T-WholeBodyControl
+(gear_sonic/data/assets/robot_description/mjcf/), Copyright (c) 2026 NVIDIA
+CORPORATION & AFFILIATES, licensed under the Apache License, Version 2.0:
+http://www.apache.org/licenses/LICENSE-2.0
+
+It is vendored unmodified. Its meshes are read from MuJoCo Menagerie's
+unitree_g1 assets at load time (see rpc/sim/sonic_scene.py).
