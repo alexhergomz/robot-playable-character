@@ -127,3 +127,87 @@ class UncertaintyWeighting(nn.Module):
     def weights(self) -> dict[str, float]:
         return {n: float(torch.exp(-self.log_var[i]))
                 for i, n in enumerate(self.terms)}
+
+
+class PhaseCoupling(nn.Module):
+    """Learned pairwise coupling between phase channels.
+
+    Per-limb phase buys limb independence and pays for it: four clocks each
+    advancing on their own predicted frequency drift apart, and a 0.038 Hz gap
+    between the legs integrated to 2921 degrees of relative drift over 16 s,
+    which tore the gait out of antiphase and curved the walk.  A single global
+    clock cannot drift but also cannot let an arm come loose from the gait,
+    which is the point of per-limb phase.
+
+    Coupling is therefore a parameter rather than a policy.  For channels i, j
+    with unit phasors ``(c, s)``, the relative angle appears directly in the
+    outer products
+
+        sin(phi_j - phi_i) = s_j c_i - c_j s_i,
+        cos(phi_j - phi_i) = c_i c_j + s_i s_j,
+
+    and a learned ``A_ij``, ``B_ij`` turn those into a phase-rate correction on
+    channel i.  Since ``A sin(d) + B cos(d) = K sin(d - psi)``, each pair learns
+    both a strength and a preferred offset; a pair that needs no coupling
+    simply learns ``K -> 0``, so nothing has to decide in advance which limbs
+    are coupled.  The diagonal is masked: a channel does not pull on itself.
+    """
+
+    def __init__(self, n_channels: int):
+        super().__init__()
+        self.n = n_channels
+        self.A = nn.Parameter(torch.zeros(n_channels, n_channels))
+        self.B = nn.Parameter(torch.zeros(n_channels, n_channels))
+        self.register_buffer("mask", 1.0 - torch.eye(n_channels))
+
+    def forward(self, cos_t: torch.Tensor, sin_t: torch.Tensor) -> torch.Tensor:
+        """(B, n) unit phasor components -> (B, n) phase-rate correction."""
+        r = torch.sqrt(cos_t ** 2 + sin_t ** 2).clamp_min(1e-6)
+        c, s = cos_t / r, sin_t / r
+        # sin_d[b,i,j] = sin(phi_j - phi_i); cos_d[b,i,j] = cos(phi_j - phi_i)
+        sin_d = s.unsqueeze(1) * c.unsqueeze(2) - c.unsqueeze(1) * s.unsqueeze(2)
+        cos_d = c.unsqueeze(2) * c.unsqueeze(1) + s.unsqueeze(2) * s.unsqueeze(1)
+        m = self.mask
+        return (sin_d * (self.A * m)).sum(-1) + (cos_d * (self.B * m)).sum(-1)
+
+    @torch.no_grad()
+    def strength(self) -> torch.Tensor:
+        """K_ij, the learned coupling magnitude for every ordered pair."""
+        return torch.hypot(self.A, self.B) * self.mask
+
+    @torch.no_grad()
+    def offset(self) -> torch.Tensor:
+        """psi_ij, the learned preferred phase offset, radians."""
+        return torch.atan2(-self.B, self.A)
+
+
+class CoupledLMPGenerator(LMPGenerator):
+    """LMP generator whose predicted phase rate carries a learned coupling term.
+
+    The trunk predicts each channel's frequency as before; the coupling module
+    adds a correction computed from every other channel's phase.  Both are
+    trained against the next-frame manifold the data supplies, so the coupling
+    is learned from motion rather than fitted to it as a preprocessing step.
+    """
+
+    def __init__(self, *args, n_phase_channels: int, manifold_slice: slice, **kw):
+        super().__init__(*args, **kw)
+        self.n_phase = n_phase_channels
+        self.manifold_slice = manifold_slice
+        self.coupling = PhaseCoupling(n_phase_channels)
+
+    def forward(self, x, gate_x, *, normalized: bool = False):
+        y = super().forward(x, gate_x, normalized=normalized)
+        n = self.n_phase
+        # gate_x is the current manifold: [a_cos | a_sin | a | f]
+        corr = self.coupling(gate_x[:, :n], gate_x[:, n:2 * n])
+        # add the correction to the predicted frequency block, in normalised units
+        s = self.manifold_slice
+        f0 = s.start + 3 * n
+        out = y.clone()
+        # The trunk's output is in normalised units (step() de-normalises it);
+        # the correction is a physical rate in Hz, so it is scaled by the same
+        # per-dimension std before it is added.
+        hz = corr / (2 * np.pi)
+        out[:, f0:f0 + n] = out[:, f0:f0 + n] + hz / self.y_std[f0:f0 + n]
+        return out

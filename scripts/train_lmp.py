@@ -13,8 +13,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from rpc.generator.lmp import (LMPGenerator, UncertaintyWeighting,
-                              skate_loss)
+from rpc.generator.lmp import (CoupledLMPGenerator, LMPGenerator,
+                              UncertaintyWeighting, skate_loss)
 
 
 class Norm:
@@ -35,6 +35,10 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--skate-weight", type=float, default=1.0,
                     help="ignored unless --fixed-weights; otherwise learned")
+    ap.add_argument("--coupling", action="store_true",
+                    help="learn pairwise phase coupling between channels; the "
+                         "correction enters the predicted frequency, so a pair "
+                         "that needs none simply learns a strength of zero")
     ap.add_argument("--skate", dest="no_skate", action="store_false", default=True,
                     help="include the stance-foot term.  Off by default: ablated "
                          "over 20 epochs it showed no benefit -- the arm that "
@@ -169,8 +173,13 @@ def main() -> None:
           f"{np.mean(camp[-1]):.2f} at {csp[-1]:.2f} m/s")
 
     xn, yn = Norm(Itr), Norm(Otr)
-    net = LMPGenerator(n_in, n_out, gate_dim=4 * C, hidden=args.hidden,
-                       n_experts=args.experts, dropout=args.dropout)
+    if args.coupling:
+        net = CoupledLMPGenerator(n_in, n_out, gate_dim=4 * C, hidden=args.hidden,
+                                  n_experts=args.experts, dropout=args.dropout,
+                                  n_phase_channels=C, manifold_slice=osl["manifold"])
+    else:
+        net = LMPGenerator(n_in, n_out, gate_dim=4 * C, hidden=args.hidden,
+                           n_experts=args.experts, dropout=args.dropout)
     net.set_normalizers(xn, yn)
 
     Itr_t = torch.from_numpy((Itr - xn.mean) / xn.std).float()
@@ -233,12 +242,22 @@ def main() -> None:
                         "n_in": n_in, "n_out": n_out,
                         "no_gait": bool(args.no_gait),
                         "no_skate": bool(args.no_skate),
+                        "coupling": bool(args.coupling),
                         "phase_target": bool(args.phase_target),
                         "keep_cols": keep_cols},
                        Path(args.out) / "generator.pt")
         if ep % 5 == 0 or ep == args.epochs - 1:
             w = uw.weights()
             top = sorted(w.items(), key=lambda kv: -kv[1])[:4]
+            if args.coupling:
+                K = net.coupling.strength()
+                g = man.get("limb_groups"); pg = man.get("channels_per_group", 1)
+                if g:
+                    agg = K.reshape(len(g), pg, len(g), pg).abs().mean(dim=(1, 3))
+                    print("        coupling K: " + "  ".join(
+                        f"{g[i]}<-{g[j]}={agg[i, j]:.3f}"
+                        for i in range(len(g)) for j in range(len(g)) if i != j
+                        and agg[i, j] > 0.02), flush=True)
             print(f"  ep {ep:3d}  train rec {tot/len(perm):.4f} skate {sk/len(perm)*1e4:7.2f}"
                   f"   val rec {vr:.4f} skate {vs*1e4:7.2f} cm^2"
                   + ("" if args.fixed_weights else
