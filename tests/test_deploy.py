@@ -102,6 +102,29 @@ class TestStreamer:
             ends.append(fi[-1])
         assert all(b > a for a, b in zip(ends, ends[1:]))
 
+    def test_replanning_every_other_frame_never_starves_the_lookahead(self):
+        # SONIC reads 10 frames ahead; between re-plans the receiver must still
+        # hold 10 generated (non-tail) frames past the current one.
+        lookahead, tail = 10, 50
+        s, sent, clock = _streamer(replan_every=2)
+        for i in range(40):
+            clock.t = i * 0.02
+            s.tick(self.walk)
+        firsts = [int(wire.unpack(m, "pose")[1]["frame_index"][0]) for m in sent]
+        assert np.diff(firsts).tolist() == [2] * (len(firsts) - 1)
+        for a, b in zip(firsts, firsts[1:]):
+            generated_end = a + s.horizon - 1            # last non-tail frame of message a
+            for j in range(a - 1, b - 1):                # frames played before message b
+                assert generated_end - j >= lookahead
+        assert len(sent) == 20
+
+    def test_replan_every_one_is_the_default_behaviour(self):
+        a, sa, ca = _streamer(); b, sb, cb = _streamer(replan_every=1)
+        for i in range(20):
+            ca.t = cb.t = i * 0.02
+            a.tick(self.walk); b.tick(self.walk)
+        assert sa == sb
+
     def test_a_second_send_in_the_same_tick_is_skipped(self):
         s, sent, clock = _streamer()
         clock.t = 0.0
@@ -185,3 +208,132 @@ def test_sonic_model_stands_still():
         pd(d, tg, sub)
     assert d.qpos[2] > 0.6
     assert np.linalg.norm(d.qpos[:2] - start) < 0.15
+
+
+BUNDLE = Path(__file__).resolve().parents[1] / "port/results/onboard_bundle"
+
+
+@pytest.mark.skipif(not (BUNDLE / "weights.npz").exists(), reason="onboard bundle not exported")
+class TestIdlePhaseHold:
+    """Channels keep the seed frame's relative phases while idle, and only then."""
+
+    stand = Command(move=np.zeros(2))
+    walk = Command(move=np.array([0.3, 0.0]))
+
+    @staticmethod
+    def _rel(g):
+        C = g.C
+        ph = np.arctan2(g.manifold[C:2 * C], g.manifold[:C])
+        return np.angle(np.exp(1j * (ph - ph[0])))
+
+    def test_off_by_default_and_channels_drift_while_standing(self):
+        from rpc.deploy import onboard
+        g = onboard.load(BUNDLE, backend="numpy")
+        rel0 = self._rel(g)
+        for _ in range(100):
+            g.step(self.stand)
+        assert not g.hold_phase_when_idle
+        assert np.abs(np.angle(np.exp(1j * (self._rel(g) - rel0)))).max() > 0.5
+
+    def test_hold_keeps_the_walking_configuration_while_standing(self):
+        from rpc.deploy import onboard
+        g = onboard.load(BUNDLE, backend="numpy", hold_phase_when_idle=True)
+        rel0 = self._rel(g)
+        for _ in range(100):
+            g.step(self.stand)
+        assert np.allclose(np.angle(np.exp(1j * (self._rel(g) - rel0))), 0.0, atol=1e-9)
+
+    def test_hold_does_not_touch_walking_steps(self):
+        from rpc.deploy import onboard
+        a = onboard.load(BUNDLE, backend="numpy")
+        b = onboard.load(BUNDLE, backend="numpy", hold_phase_when_idle=True)
+        for _ in range(60):
+            fa, fb = a.step(self.walk), b.step(self.walk)
+        assert np.array_equal(a.manifold, b.manifold) and np.array_equal(fa.joint_pos, fb.joint_pos)
+
+
+def _raw(lx=0.0, ly=0.0, rx=0.0, ry=0.0, buttons=()):
+    import struct
+    from rpc.deploy.remote import BUTTONS
+    b = bytearray(40)
+    for n in buttons:
+        byte, bit = BUTTONS[n]
+        b[byte] |= 1 << bit
+    b[4:8], b[8:12], b[12:16], b[20:24] = (struct.pack("<f", v) for v in (lx, rx, ry, ly))
+    return list(b)
+
+
+class TestRemote:
+    def test_round_trip_matches_unitree_layout(self):
+        from rpc.deploy.remote import parse
+        s = parse(_raw(lx=0.25, ly=-0.5, rx=0.75, ry=0.1, buttons=("R1", "A", "left")))
+        assert (s.lx, s.ly, s.rx) == pytest.approx((0.25, -0.5, 0.75))
+        assert s.buttons == {"R1", "A", "left"}
+
+    def test_no_command_without_deadman(self):
+        from rpc.deploy.remote import StickMap, parse, to_command
+        assert to_command(parse(_raw(ly=1.0)), StickMap()) is None
+        assert to_command(parse(_raw(ly=1.0, buttons=("L1",))), StickMap()) is None
+
+    def test_stick_directions_and_scale(self):
+        from rpc.deploy.remote import StickMap, parse, to_command
+        m = StickMap(max_speed=0.3, max_turn=0.5)
+        fwd = to_command(parse(_raw(ly=1.0, buttons=("R1",))), m)
+        left = to_command(parse(_raw(lx=-1.0, buttons=("R1",))), m)
+        ccw = to_command(parse(_raw(rx=-1.0, buttons=("R1",))), m)
+        assert fwd.move == pytest.approx([0.3, 0.0]) and fwd.turn == 0.0
+        assert left.move == pytest.approx([0.0, 0.3])
+        assert ccw.turn == pytest.approx(0.5)
+
+    def test_deadband_gives_exact_zero(self):
+        from rpc.deploy.remote import StickMap, parse, to_command
+        c = to_command(parse(_raw(lx=0.05, ly=-0.08, rx=0.09, buttons=("R1",))), StickMap())
+        assert np.all(c.move == 0.0) and c.turn == 0.0
+
+
+class TestLauncherSession:
+    held = staticmethod(lambda: __import__("rpc.deploy.remote", fromlist=["x"]).parse(_raw(ly=1.0, buttons=("R1",))))
+
+    def _session(self):
+        from rpc.deploy.launcher import Session
+        from rpc.deploy.remote import StickMap
+        gen = _FakeGen(); calls = []
+        orig = gen.step
+        gen.step = lambda c: (calls.append(1), orig(c))[1]
+        s, sent, clock = _streamer(gen=gen, limits=StreamLimits(max_speed=0.3, brake_s=0.5))
+        return Session(s, StickMap(), stale_s=0.25, clock=clock), sent, clock, calls
+
+    def _run(self, sess, clock, t0, t1, remote):
+        for i in range(int(round((t1 - t0) * 50))):
+            clock.t = t0 + i * 0.02
+            sess.step(*remote(clock.t))
+
+    def test_streams_only_while_held_then_brakes_and_goes_quiet(self):
+        sess, sent, clock, _ = self._session()
+        self._run(sess, clock, 0.0, 1.0, lambda t: (self.held(), t))
+        n_held = len(sent)
+        assert sess.state == "streaming" and n_held > 0
+        self._run(sess, clock, 1.0, 1.5, lambda t: (None, None))
+        assert len(sent) > n_held                       # brake messages
+        self._run(sess, clock, 1.5, 3.0, lambda t: (None, None))
+        n_after = len(sent)
+        self._run(sess, clock, 3.0, 4.0, lambda t: (None, None))
+        assert sess.state == "idle" and len(sent) == n_after   # nothing more is sent
+
+    def test_stale_remote_counts_as_released(self):
+        sess, sent, clock, _ = self._session()
+        self._run(sess, clock, 0.0, 0.5, lambda t: (self.held(), t))
+        self._run(sess, clock, 0.5, 2.0, lambda t: (self.held(), 0.4))   # last sample stuck at t=0.4
+        assert sess.state == "idle"
+
+    def test_resume_after_pause_has_no_catch_up_burst_and_frames_increase(self):
+        sess, sent, clock, calls = self._session()
+        self._run(sess, clock, 0.0, 1.0, lambda t: (self.held(), t))
+        self._run(sess, clock, 1.0, 6.0, lambda t: (None, None))
+        before = len(calls)
+        clock.t = 6.0
+        sess.step(self.held(), 6.0)
+        # one real step to reach the clock frame + the horizon rollout, not 250 catch-up steps
+        assert len(calls) - before <= 1 + sess.st.horizon
+        ends = [int(wire.unpack(m, "pose")[1]["frame_index"][-1]) for m in sent]
+        assert all(b > a for a, b in zip(ends, ends[1:]))

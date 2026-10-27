@@ -22,7 +22,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-import torch
 
 from ..control.command import Command, TrajectoryPredictor
 from ..motion import quat as Q
@@ -56,7 +55,8 @@ class KinematicCharacterController:
 
     def __init__(self, model, spec: RobotFeatureSpec, device: str = "cpu",
                  prediction_weight: float = 0.3, max_speed: float = 4.0):
-        self.model = model.to(device).eval()
+        # A torch module, or an onboard backend (no torch on the robot).
+        self.model = model.to(device).eval() if hasattr(model, "to") else model
         self.spec = spec
         self.device = device
         self.prediction_weight = prediction_weight
@@ -94,6 +94,7 @@ class KinematicCharacterController:
     def step(self, cmd: Command) -> KinematicFrame:
         self.traj.apply_command(cmd)
         x = self.observe()
+        import torch
         with torch.no_grad():
             y = self.model.step(torch.from_numpy(x)[None].to(self.device),
                                 torch.tensor([self.phase], dtype=torch.float32,

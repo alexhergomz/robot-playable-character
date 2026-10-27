@@ -194,18 +194,45 @@ class TrajectoryPredictor:
         if cmd.speed > 1e-3:
             target_dir = cmd.move / cmd.speed
 
-        pos, direction = self.pos[n].copy(), self.dir[n].copy()
+        # All n future frames at once (this runs ~13x per control tick on the
+        # robot's CPU, where the per-frame Python loop cost 2.3 ms).  Same
+        # arithmetic as the loop it replaces, kept in _apply_command_loop and
+        # checked against it in tests/test_control.py.
+        k = np.arange(1, n + 1)
+        w = (1.0 - (1.0 - k / n) ** bias)[:, None]   # 0 at the character, 1 at the horizon
+        yaw = cmd.turn * (k * self.dt)
+        c, s = np.cos(yaw), np.sin(yaw)
+        steer = np.stack([c * target_dir[0] - s * target_dir[1],
+                          s * target_dir[0] + c * target_dir[1]], axis=1)
+        # sequential running sum, so rounding matches pos = pos + move*dt
+        pos = np.cumsum(np.vstack([self.pos[n], np.tile(cmd.move * self.dt, (n, 1))]), axis=0)[1:]
+        sl = slice(n + 1, 2 * n + 1)
+        self.pos[sl] = self.pos[sl] * (1 - w) + pos * w
+        d = self.dir[sl] * (1 - w) + steer * w
+        nrm = np.sqrt((d * d).sum(axis=1))
+        ok = nrm > 1e-8
+        d[ok] /= nrm[ok, None]
+        self.dir[sl] = d
+        self.gait[sl] = self.gait[sl] * (1 - w) + gait * w
+
+    def _apply_command_loop(self, cmd: Command) -> None:
+        """Reference per-frame form of :meth:`apply_command`, for tests."""
+        n = self.n_half
+        bias = 1.0 + 6.0 * float(np.clip(cmd.responsiveness, 0.0, 1.0))
+        gait = cmd.effective_gait()
+        target_dir = self.dir[n].copy()
+        if cmd.speed > 1e-3:
+            target_dir = cmd.move / cmd.speed
+        pos = self.pos[n].copy()
         for k in range(1, n + 1):
-            t = k / n
-            w = 1.0 - (1.0 - t) ** bias            # 0 at the character, 1 at the horizon
+            w = 1.0 - (1.0 - k / n) ** bias
             yaw = cmd.turn * (k * self.dt)
             c, s = np.cos(yaw), np.sin(yaw)
             steer = np.array([[c, -s], [s, c]]) @ target_dir
             pos = pos + cmd.move * self.dt
-            direction = steer
             i = n + k
             self.pos[i] = self.pos[i] * (1 - w) + pos * w
-            self.dir[i] = self.dir[i] * (1 - w) + direction * w
+            self.dir[i] = self.dir[i] * (1 - w) + steer * w
             nrm = np.linalg.norm(self.dir[i])
             if nrm > 1e-8:
                 self.dir[i] /= nrm

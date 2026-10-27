@@ -20,7 +20,6 @@ from __future__ import annotations
 import copy
 
 import numpy as np
-import torch
 
 from ..control.command import Command
 from .kinematic_runtime import KinematicFrame
@@ -33,8 +32,10 @@ class LMPCharacterController:
     def __init__(self, model, spec, out_slices, manifold_dim, n_feet=2,
                  device: str = "cpu", prediction_weight: float = 0.3,
                  max_speed: float = 4.0, keep_cols=None, amplitude_curve=True,
-                 curve=None):
-        self.model = model.to(device).eval()
+                 curve=None, hold_phase_when_idle: bool = False):
+        # A torch module, or an onboard backend exposing ``step_numpy(x, gate)``
+        # (TensorRT / numpy): the robot has no torch.
+        self.model = model.to(device).eval() if hasattr(model, "to") else model
         self.spec = spec
         self.device = device
         self.prediction_weight = prediction_weight
@@ -62,6 +63,16 @@ class LMPCharacterController:
             if f.exists():
                 d = json.loads(f.read_text())
                 self._amp = (np.asarray(d["speed"]), np.asarray(d["amplitude"]))
+        # Each channel advances at its own predicted frequency (1.0-1.4 Hz on the
+        # deploy model).  While walking, the pose keeps them coordinated; while
+        # standing nothing does, so their relative phases drift and the next walk
+        # starts from an arbitrary configuration.  Measured in the SONIC closed
+        # loop at 0.6 m/s commanded: 0.34-0.68 m/s depending only on how long the
+        # robot stood first.  Locking the channels to the relative phases of the
+        # seed motion frame while idle made it 0.44-0.45 for 1-15 s stands, and
+        # halved the pose jitter while standing.  Opt-in until confirmed on the
+        # robot; the principled fix is the learned PhaseCoupling (lmp.py).
+        self.hold_phase_when_idle = bool(hold_phase_when_idle)
         self.reset()
 
     def reset(self, joint_pos=None, joint_vel=None, root_height=0.75,
@@ -84,6 +95,8 @@ class LMPCharacterController:
             manifold = np.concatenate([np.cos(phi), np.sin(phi),
                                        np.ones(C), np.full(C, 1.2)])
         self.manifold = np.asarray(manifold, float)
+        ph = np.arctan2(self.manifold[C:2 * C], self.manifold[:C])
+        self._idle_rel = ph - ph[0]          # channel configuration held while idle
         # (n_feet, 4): character-frame position + contact flag, matching the
         # F array the network was trained on
         self.foot = np.zeros((self.n_feet, 4)) if foot is None else np.asarray(foot, float)
@@ -148,11 +161,16 @@ class LMPCharacterController:
                                             tgt, m[3 * C:]])
         k.traj.apply_command(cmd)
         x = self.observe()
-        with torch.no_grad():
-            y = self.model.step(
-                torch.from_numpy(x)[None].to(self.device),
-                torch.from_numpy(self.manifold.astype(np.float32))[None].to(self.device),
-            )[0].cpu().numpy()
+        gate = self.manifold.astype(np.float32)
+        if hasattr(self.model, "step_numpy"):
+            y = self.model.step_numpy(x, gate)
+        else:
+            import torch
+            with torch.no_grad():
+                y = self.model.step(
+                    torch.from_numpy(x)[None].to(self.device),
+                    torch.from_numpy(gate)[None].to(self.device),
+                )[0].cpu().numpy()
         o = self._osl
         prev = k.joint_pos
         k.joint_pos = y[o["joint_pos"]].copy()
@@ -192,6 +210,8 @@ class LMPCharacterController:
         pred = y[o["manifold"]]
         f_new = np.clip(pred[3 * C:], 0.2, 4.0)              # Hz, physically bounded
         phi = np.arctan2(as_, ac) + 2 * np.pi * f * self.dt
+        if self.hold_phase_when_idle and cmd.speed < 1e-3 and abs(cmd.turn) < 1e-3:
+            phi = phi[0] + self._idle_rel
         self.manifold = np.concatenate([a * np.cos(phi), a * np.sin(phi), a, f_new])
 
         self.n_steps += 1

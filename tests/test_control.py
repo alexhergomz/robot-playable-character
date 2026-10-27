@@ -20,6 +20,23 @@ class TestTrajectory:
         pos, _, _ = t.sample()
         assert abs(pos[-1, 0] - 2.0) < 0.05          # 2 m/s over a 1 s horizon
 
+    def test_vectorized_apply_command_matches_loop(self):
+        # The robot runs the vectorized form; it must be the loop, not an approximation.
+        rng = np.random.default_rng(0)
+        for fps in (30.0, 50.0):
+            a, b = TrajectoryPredictor(FeatureConfig(fps=fps)), TrajectoryPredictor(FeatureConfig(fps=fps))
+            a.reset(); b.reset()
+            for _ in range(300):
+                cmd = Command(move=rng.uniform(-2, 2, 2) * (rng.random() > 0.2),
+                              turn=rng.uniform(-2, 2) * (rng.random() > 0.3),
+                              responsiveness=rng.random())
+                a.apply_command(cmd); b._apply_command_loop(cmd)
+                for t in (a, b):
+                    t.push_past(np.array([0.02, 0.0, 0.01]))
+                assert np.allclose(a.pos, b.pos, rtol=0, atol=1e-12)
+                assert np.allclose(a.dir, b.dir, rtol=0, atol=1e-12)
+                assert np.allclose(a.gait, b.gait, rtol=0, atol=1e-12)
+
     def test_responsiveness_is_monotone(self):
         near = []
         for r in (0.0, 0.25, 0.5, 0.75, 1.0):

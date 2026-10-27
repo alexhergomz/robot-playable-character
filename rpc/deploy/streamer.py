@@ -79,7 +79,8 @@ class PoseStreamer:
                  mujoco_to_isaaclab: np.ndarray, horizon: int = 12,
                  hz: float = 50.0, limits: StreamLimits | None = None,
                  stand_pose: np.ndarray | None = None,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 replan_every: int = 1):
         self.gen = generator
         self.sink = sink
         self.lo = np.asarray(joint_lower, float)
@@ -92,6 +93,14 @@ class PoseStreamer:
         self.hz = float(hz)
         self.limits = limits or StreamLimits()
         self.clock = clock
+        # Re-plan the horizon every N frames instead of every frame.  Between
+        # re-plans the receiver plays the frames it already has (each message
+        # carries `horizon` frames), so this trades N-1 frames of command
+        # latency for 1/N of the generator cost.
+        self.replan_every = int(replan_every)
+        if self.replan_every < 1 or self.replan_every >= self.horizon:
+            raise ValueError("replan_every must be in [1, horizon)")
+        self._last_k: int | None = None
         self.stats = StreamStats()
         self._t0: float | None = None
         self._frame = 0                  # frame the generator's state corresponds to
@@ -153,6 +162,8 @@ class PoseStreamer:
         if k + self.horizon + int(round(self.limits.tail_s * self.hz)) <= self.stats.last_end:
             self.stats.skipped_same_tick += 1
             return False
+        if self._last_k is not None and k - self._last_k < self.replan_every:
+            return False
         c = self._safe(cmd)
         while self._frame < k:                   # catch the generator up to now
             self.gen.step(c)
@@ -171,7 +182,21 @@ class PoseStreamer:
         self.sink(wire.pose_message(pos, vel, quat, idx, self.remap))
         self.stats.sent += 1
         self.stats.last_end = int(idx[-1])
+        self._last_k = k
         return True
+
+    def advance(self, cmd: Command) -> None:
+        """Step the generator to the current clock frame without sending.
+
+        For while the stream is paused (deadman released): the receiver plays the
+        last message's stand-pose tail, and the generator keeps pace with the
+        clock so resuming costs one step, not a catch-up burst of every missed frame.
+        """
+        k = self._clock_frame()
+        c = self._safe(cmd)
+        while self._frame < k:
+            self.gen.step(c)
+            self._frame += 1
 
     def brake(self, sleep: Callable[[float], None] = time.sleep) -> None:
         """Graceful stop: stream zero velocity for ``brake_s``, then return.

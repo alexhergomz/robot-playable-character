@@ -76,7 +76,7 @@ class ReceiverModel:
         self.cursor += 1
 
 
-def build(bundle_path, device):
+def build(bundle_path, device, hold_phase_when_idle=False):
     """Generator from a deploy bundle (scripts/export_deploy.py): no datasets."""
     ck = torch.load(bundle_path, map_location="cpu", weights_only=False)
     man, a = ck["manifest"], ck["args"]; C = man["phase_channels"]
@@ -88,7 +88,8 @@ def build(bundle_path, device):
     net.load_state_dict(ck["state"])
     g = LMPCharacterController(net, spec, ck["out_slices"], 4 * C, n_feet=man["n_feet"],
                                keep_cols=ck.get("keep_cols"),
-                               curve=ck["amplitude_curve"], device=device)
+                               curve=ck["amplitude_curve"], device=device,
+                               hold_phase_when_idle=hold_phase_when_idle)
     g.reset(joint_pos=P.DEFAULT_ANGLES.copy(), root_height=0.76,
             manifold=ck["init_manifold"].copy(), foot=ck["init_foot"].copy())
     return g
