@@ -86,6 +86,12 @@ Optional (needs sudo; owner's decision): raise the GPU min clock for horizon 12 
   unitree_sdk2py fork: `uv pip install --no-deps -e assets/sonic/gr00t_wbc/external_dependencies/unitree_sdk2_python`.
 - Onboard generator bundle: `python port/scripts/export_onboard_bundle.py` (needs `runs/deploy/bundle.pt`
   from `scripts/export_deploy.py`).
+- **Prebuilt artifacts are in the repo via Git LFS** (`git lfs install && git lfs pull` after cloning):
+  `runs/deploy/bundle.pt` (the trained deploy generator; it cannot be re-exported without the processed
+  training data), `port/results/onboard_bundle/` (torch-free generator: ONNX + numpy weights) and
+  `port/bin_aarch64/` (the deploy app cross-built for the Orin, TRT 8.5).  With those plus the HF SONIC
+  models and the patched upstream clone, `bash port/scripts/make_robot_bundle.sh` builds the robot bundle
+  without a robot rootfs copy.
 - Closed loops: `bash port/scripts/sim_closed_loop.sh TAG [--speed 0.3 --hold-phase --short-stand]`,
   `bash port/scripts/launcher_closed_loop.sh TAG port/scripts/remote_script_basic.json`; overlay video:
   `python port/scripts/overlay_video.py --run port/results/closed_loop/TAG --remote ... --offset ...`.
