@@ -45,6 +45,7 @@ was insufficient.
 | MuJoCo sim + tracking env | works; reward discriminates, 21× realtime/env |
 | **GEAR-SONIC executor** | **working** — tracks a reference 38 s without falling, recovers from 1.0 m/s shoves, no training |
 | PPO tracking policy | superseded by SONIC; kept as an ablation baseline |
+| Deployment path (onboard, no reflash) | SONIC's deploy app ported to the G1 Orin (TRT 8.5); generator runs onboard; full chain validated in NVIDIA's own MuJoCo sim. **Not yet run on the robot** — see [`port/HANDOFF.md`](port/HANDOFF.md) |
 | Real hardware | not attempted |
 
 ## Quick start

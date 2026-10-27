@@ -1,0 +1,98 @@
+diff --git a/gear_sonic_deploy/src/TRTInference/InferenceEngine.cpp b/gear_sonic_deploy/src/TRTInference/InferenceEngine.cpp
+index 1243500..5da2f88 100644
+--- a/gear_sonic_deploy/src/TRTInference/InferenceEngine.cpp
++++ b/gear_sonic_deploy/src/TRTInference/InferenceEngine.cpp
+@@ -82,9 +82,11 @@ namespace
+         int size = -1;
+         switch ( dataType )
+         {
++#if NV_TENSORRT_MAJOR >= 10
+             case nvinfer1::DataType::kINT64:
+             size = sizeof( uint64_t );
+             break;
++#endif
+             
+             case nvinfer1::DataType::kINT32:
+             case nvinfer1::DataType::kFLOAT:
+@@ -92,11 +94,15 @@ namespace
+             break;
+             
+             case nvinfer1::DataType::kHALF:
++#if NV_TENSORRT_MAJOR >= 9
+             case nvinfer1::DataType::kBF16:
++#endif
+             size = sizeof( uint16_t );
+             break;
+             
++#if NV_TENSORRT_MAJOR > 8 || (NV_TENSORRT_MAJOR == 8 && NV_TENSORRT_MINOR >= 6)
+             case nvinfer1::DataType::kFP8:
++#endif
+             case nvinfer1::DataType::kINT8:
+             case nvinfer1::DataType::kBOOL:
+             case nvinfer1::DataType::kUINT8:
+@@ -785,8 +791,10 @@ DataType TRTInferenceEngine::GetTensorDataType(std::string name) const
+         return DataType::BOOL;
+         case nvinfer1::DataType::kUINT8:
+         return DataType::UINT8;
++#if NV_TENSORRT_MAJOR >= 10
+         case nvinfer1::DataType::kINT64:
+         return DataType::INT64;
++#endif
+         default:
+         LOG_ERROR("ValidateTensorSize: Tensor " + name + " not found.");
+         return DataType::UNKNOWN;
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/motor_gain_scaling.cpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/motor_gain_scaling.cpp
+index 4331c4b..ccbe76a 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/motor_gain_scaling.cpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/motor_gain_scaling.cpp
+@@ -2,7 +2,10 @@
+ 
+ #include <array>
+ #include <cctype>
++#include <cerrno>
+ #include <charconv>
++#include <cstdio>
++#include <cstdlib>
+ #include <optional>
+ #include <string>
+ #include <string_view>
+@@ -43,9 +46,20 @@ std::optional<float> parse_scale(std::string_view value, std::string& error) {
+   }
+ 
+   float scale = 0.0F;
++#if __cpp_lib_to_chars >= 201611L
+   const auto result = std::from_chars(value.data(), value.data() + value.size(),
+                                       scale, std::chars_format::general);
+   if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
++#else
++  // libstdc++ < 11 has no floating-point from_chars. strtof also accepts hex
++  // ("0x1"), which chars_format::general rejects, so reject 'x' explicitly.
++  const std::string text(value);
++  char* end = nullptr;
++  errno = 0;
++  scale = std::strtof(text.c_str(), &end);
++  if (errno != 0 || end != text.c_str() + text.size() ||
++      text.find_first_of("xX") != std::string::npos) {
++#endif
+     error = "invalid scale factor '" + std::string(value) + "'";
+     return std::nullopt;
+   }
+@@ -106,9 +120,18 @@ bool select_motor_range(
+ 
+ std::string format_scale(float scale) {
+   std::array<char, 32> buffer;
++#if __cpp_lib_to_chars >= 201611L
+   const auto result =
+       std::to_chars(buffer.data(), buffer.data() + buffer.size(), scale);
+   return std::string(buffer.data(), result.ptr);
++#else
++  // Shortest %g spelling that round-trips, like to_chars.
++  for (int precision = 1; precision <= 9; ++precision) {
++    std::snprintf(buffer.data(), buffer.size(), "%.*g", precision, scale);
++    if (std::strtof(buffer.data(), nullptr) == scale) break;
++  }
++  return std::string(buffer.data());
++#endif
+ }
+ 
+ }  // namespace

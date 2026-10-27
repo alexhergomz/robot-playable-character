@@ -1,0 +1,10 @@
+# Native x86 build of gear_sonic_deploy for closed-loop MuJoCo tests on the laptop.
+# Matches the laptop (Ubuntu 24.04, glibc 2.39). TensorRT 10.7 comes from the pip wheel
+# (libs) and NVIDIA/TensorRT v10.7.0 (headers); CUDA 12 runtime from Ubuntu's toolkit.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        g++ cmake ninja-build pkg-config ca-certificates \
+        libzmq3-dev cppzmq-dev libyaml-cpp-dev libeigen3-dev zlib1g-dev libgtest-dev \
+        nlohmann-json3-dev libmsgpack-cxx-dev nvidia-cuda-toolkit-gcc nvidia-cuda-dev \
+    && rm -rf /var/lib/apt/lists/*

@@ -22,3 +22,22 @@ venv/
 
 .DS_Store
 .ipynb_checkpoints/
+
+# SONIC port: build outputs, downloaded deps, robot results (large / robot-specific)
+port/build/
+port/build.log
+port/build_x86.log
+port/deps/
+port/results/
+
+# Private access notes (IPs, emails, host keys)
+ACCESO_AMIGO_*.md
+port/sim_env/
+port/deps_x86/
+port/build_x86/
+port/bin_aarch64/
+port/bin_x86/
+
+# Office lock files
+.~lock.*#
+port/robot_bundle/
